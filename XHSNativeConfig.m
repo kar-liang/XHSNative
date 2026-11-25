@@ -9,6 +9,7 @@
 
 NSString *const kXHSNativeSearchTab = @"XHSNative.searchTab";
 NSString *const kXHSNativeMinimize = @"XHSNative.minimize";
+NSString *const kXHSNativeHideDiandian = @"XHSNative.hideDiandian";
 NSString *const kXHSNativeGlassNote = @"XHSNative.glass.note";
 NSString *const kXHSNativeGlassSearch = @"XHSNative.glass.search";
 NSString *const kXHSNativeGlassComments = @"XHSNative.glass.comments";

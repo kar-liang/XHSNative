@@ -7,13 +7,14 @@
 //
 #import <UIKit/UIKit.h>
 
-#define XHSNativeVersion @"1.4"
+#define XHSNativeVersion @"1.5"
 
 @class XYTabbarController;
 
 // 开关，默认都是开的
 extern NSString *const kXHSNativeSearchTab;     // 右侧的搜索
 extern NSString *const kXHSNativeMinimize;      // 滚动时收起底栏
+extern NSString *const kXHSNativeHideDiandian;  // 隐藏首页左上角的点点
 extern NSString *const kXHSNativeGlassNote;
 extern NSString *const kXHSNativeGlassSearch;
 extern NSString *const kXHSNativeGlassComments;

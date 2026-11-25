@@ -522,6 +522,15 @@ static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey;
         else if ([name isEqualToString:@"XYSegmentControl"]) segment = view;
         else if (view != publish && [view isKindOfClass:UIButton.class] && (!search || CGRectGetMinX(view.frame) > CGRectGetMinX(search.frame))) search = view;
     }
+    // 左上角的 XYMenuButton 是「点点」入口，按开关连它背后那块玻璃一起藏/放出来
+    // （玻璃是和按钮同一位置的另一个视图，按 frame 相等认，不会误伤中间分段控件的玻璃板）。
+    // 开关切换后 applySettings 会触发重新布局，所以显隐立即生效。
+    if (menu) {
+        BOOL hideDiandian = [XHSNativeConfig.shared boolForKey:kXHSNativeHideDiandian];
+        menu.hidden = hideDiandian;
+        for (UIView *view in bar.subviews)
+            if ([view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, menu.frame)) view.hidden = hideDiandian;
+    }
     if (!menu || !search) return;
     XHSNativeConfig.shared.searchButton = (UIControl *)search;
 
@@ -838,6 +847,11 @@ static void darken(UIVisualEffectView *glass) {
         [rows addObject:switchRow(tabTitles()[name], ![config isTabHidden:name], [@"tab." stringByAppendingString:name])];
     [rows addObject:switchRow(@"搜索", [config boolForKey:kXHSNativeSearchTab], [@"pref." stringByAppendingString:kXHSNativeSearchTab])];
     [rows addObject:switchRow(@"滚动时收起", [config boolForKey:kXHSNativeMinimize], [@"pref." stringByAppendingString:kXHSNativeMinimize])];
+    [rows addObject:gap(24)];
+
+    [rows addObject:row(@"label", rowTitle(@"首页"), @"home.heading")];
+    [rows addObject:gap(8)];
+    [rows addObject:switchRow(@"隐藏点点", [config boolForKey:kXHSNativeHideDiandian], [@"pref." stringByAppendingString:kXHSNativeHideDiandian])];
     [rows addObject:gap(24)];
 
     [rows addObject:row(@"label", rowTitle(@"液态玻璃"), @"glass.heading")];
