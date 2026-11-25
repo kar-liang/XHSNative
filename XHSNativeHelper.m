@@ -612,15 +612,15 @@ static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey, kTopSearch
     XHSNativeConfig.shared.searchButton = (UIControl *)search;
 
     BOOL searchTopLeft = [XHSNativeConfig.shared boolForKey:kXHSNativeSearchTopLeft];
-    // 搜索放左上角时顶栏按未交换走：发布要去的底栏右侧格已被取消，交换无处落点
-    BOOL swapped = XHSNativeConfig.shared.isPublishSwapped && !searchTopLeft;
+    // 交换在搜索放左上角时改成顶栏左右互换（发布占左上角、搜索回右上角）；底栏那边的交换仍由 rebuildTabs 掩码处理
+    BOOL swapped = XHSNativeConfig.shared.isPublishSwapped;
 
     // 左上角入口只有一个位置：搜索放左上角时被搜索按钮占住；否则听「隐藏点点」。入口和它背后那块玻璃一起藏
     BOOL hideMenu = searchTopLeft || [XHSNativeConfig.shared boolForKey:kXHSNativeHideDiandian];
     menu.hidden = hideMenu;
     for (UIView *view in bar.subviews)
         if ([view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, menu.frame)) view.hidden = hideMenu;
-    if (searchTopLeft) {
+    if (searchTopLeft && !swapped) {
         if (!topSearch) {
             UIButtonConfiguration *buttonConfig = [UIButtonConfiguration glassButtonConfiguration];
             buttonConfig.image = [UIImage systemImageNamed:@"magnifyingglass"];
@@ -638,7 +638,25 @@ static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey, kTopSearch
         topSearch.hidden = YES;
     }
 
-    if (swapped) {
+    if (swapped && searchTopLeft) {
+        // 搜索放左上角时，交换改成顶栏左右互换：发布留下来占左上角入口的位置，原搜索放出来回到右上角
+        if (!publish) {
+            UIButtonConfiguration *config = [UIButtonConfiguration glassButtonConfiguration];
+            config.image = [UIImage systemImageNamed:@"plus"];
+            config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
+            config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+            config.baseForegroundColor = UIColor.labelColor;
+            publish = [UIButton buttonWithConfiguration:config primaryAction:[UIAction actionWithHandler:^(UIAction *action) { [XHSNativeHelper openPublish]; }]];
+            publish.accessibilityLabel = @"发布";
+            objc_setAssociatedObject(bar, &kPublishKey, publish, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (publish.superview != bar) [bar addSubview:publish];
+        if (!CGRectEqualToRect(publish.frame, menu.frame)) publish.frame = menu.frame;
+        for (UIView *view in bar.subviews) {
+            BOOL backing = [view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, search.frame);
+            if (view == search || backing) view.hidden = NO;
+        }
+    } else if (swapped) {
         // 发布去了底栏，原来的搜索留在顶栏。之前收起过的话放出来
         if (publish) {
             [publish removeFromSuperview];
@@ -1083,6 +1101,8 @@ static void darken(UIVisualEffectView *glass) {
     [rows addObject:switchRow(@"滚动时收起", [config boolForKey:kXHSNativeMinimize], [@"pref." stringByAppendingString:kXHSNativeMinimize])];
     [rows addObject:switchRow(@"交换搜索与发布", config.isPublishSwapped, [@"pref." stringByAppendingString:kXHSNativeSwapPublish])];
     [rows addObject:switchRow(@"搜索放左上角", [config boolForKey:kXHSNativeSearchTopLeft], [@"pref." stringByAppendingString:kXHSNativeSearchTopLeft])];
+    [rows addObject:gap(8)];
+    [rows addObject:row(@"label", rowTitle(@"开启时搜索在左上角、发布在右上角；再打开「交换搜索与发布」，两者左右互换。"), @"tabs.topleft.note")];
     [rows addObject:gap(8)];
     [rows addObject:row(@"label", rowTitle(@"交换后，发布在底栏右侧，搜索回到首页顶栏。"), @"tabs.note")];
     [rows addObject:gap(24)];
