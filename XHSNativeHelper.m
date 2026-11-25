@@ -324,7 +324,8 @@ static NSArray<NSArray *> *glassBars(void) {
         tab.badgeValue = (legacyNames && badgeIndex != NSNotFound) ? controller.badgeValueDict[@(badgeIndex)] : [self tabNamed:name].badgeValue;
         [tabs addObject:tab];
     }
-    if ([config boolForKey:kXHSNativeSearchTab]) {
+    // 「搜索放左上角」开着时底栏不要搜索标签，底栏就是一个居中胶囊；关着才按原来的「搜索」开关来
+    if (![config boolForKey:kXHSNativeSearchTopLeft] && [config boolForKey:kXHSNativeSearchTab]) {
         // 系统的搜索标签会自己单独排在右边。它不切页面，点了直接开小红书的搜索，见 shouldSelectTab
         if (!config.searchPage) config.searchPage = [UIViewController new];
         UIViewController *page = config.searchPage;
@@ -427,7 +428,7 @@ static NSArray<NSArray *> *glassBars(void) {
 
 #pragma mark - 首页顶栏
 
-static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey;
+static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey, kTopSearchKey;
 
 + (NSHashTable *)pinnedEdgeEffects {
     static NSHashTable *table;
@@ -515,21 +516,44 @@ static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey;
     [self stripBarBackground:bar];
 
     UIButton *publish = objc_getAssociatedObject(bar, &kPublishKey);
+    UIButton *topSearch = objc_getAssociatedObject(bar, &kTopSearchKey);
     UIView *menu = nil, *segment = nil, *search = nil;
     for (UIView *view in bar.subviews) {
         NSString *name = NSStringFromClass(view.class);
         if ([name isEqualToString:@"XYMenuButton"]) menu = view;
         else if ([name isEqualToString:@"XYSegmentControl"]) segment = view;
-        else if (view != publish && [view isKindOfClass:UIButton.class] && (!search || CGRectGetMinX(view.frame) > CGRectGetMinX(search.frame))) search = view;
+        else if (view != publish && view != topSearch && [view isKindOfClass:UIButton.class] && (!search || CGRectGetMinX(view.frame) > CGRectGetMinX(search.frame))) search = view;
     }
-    // 左上角的 XYMenuButton 是「点点」入口，按开关连它背后那块玻璃一起藏/放出来
-    // （玻璃是和按钮同一位置的另一个视图，按 frame 相等认，不会误伤中间分段控件的玻璃板）。
+    // 左上角的 XYMenuButton 是「点点」入口，这个位置两种用法，二选一，只在这里决定它的显隐：
+    // 「搜索放左上角」开着时，这个位置放一个玻璃搜索按钮，点点连同背后那块玻璃一起藏起来；
+    // 关着时没有搜索按钮，点点的显隐回到「隐藏点点」开关。
+    // （玻璃是和按钮同一位置的另一个视图，按 frame 相等认，不会误伤中间分段控件的玻璃板。）
     // 开关切换后 applySettings 会触发重新布局，所以显隐立即生效。
     if (menu) {
-        BOOL hideDiandian = [XHSNativeConfig.shared boolForKey:kXHSNativeHideDiandian];
-        menu.hidden = hideDiandian;
+        BOOL searchTopLeft = [XHSNativeConfig.shared boolForKey:kXHSNativeSearchTopLeft];
+        BOOL hideMenu = searchTopLeft || [XHSNativeConfig.shared boolForKey:kXHSNativeHideDiandian];
+        menu.hidden = hideMenu;
         for (UIView *view in bar.subviews)
-            if ([view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, menu.frame)) view.hidden = hideDiandian;
+            if ([view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, menu.frame)) view.hidden = hideMenu;
+        if (searchTopLeft) {
+            if (!topSearch) {
+                UIButtonConfiguration *config = [UIButtonConfiguration glassButtonConfiguration];
+                config.image = [UIImage systemImageNamed:@"magnifyingglass"];
+                config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
+                config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+                config.baseForegroundColor = UIColor.labelColor;
+                topSearch = [UIButton buttonWithConfiguration:config primaryAction:[UIAction actionWithHandler:^(UIAction *action) { [XHSNativeHelper openSearch]; }]];
+                topSearch.accessibilityLabel = @"搜索";
+                objc_setAssociatedObject(bar, &kTopSearchKey, topSearch, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            }
+            if (topSearch.superview != bar) [bar addSubview:topSearch];
+            if (!CGRectEqualToRect(topSearch.frame, menu.frame)) topSearch.frame = menu.frame;
+            topSearch.hidden = NO;
+        } else if (topSearch) {
+            topSearch.hidden = YES;
+        }
+    } else if (topSearch) {
+        topSearch.hidden = YES;
     }
     if (!menu || !search) return;
     XHSNativeConfig.shared.searchButton = (UIControl *)search;
@@ -852,6 +876,7 @@ static void darken(UIVisualEffectView *glass) {
     [rows addObject:row(@"label", rowTitle(@"首页"), @"home.heading")];
     [rows addObject:gap(8)];
     [rows addObject:switchRow(@"隐藏点点", [config boolForKey:kXHSNativeHideDiandian], [@"pref." stringByAppendingString:kXHSNativeHideDiandian])];
+    [rows addObject:switchRow(@"搜索放左上角", [config boolForKey:kXHSNativeSearchTopLeft], [@"pref." stringByAppendingString:kXHSNativeSearchTopLeft])];
     [rows addObject:gap(24)];
 
     [rows addObject:row(@"label", rowTitle(@"液态玻璃"), @"glass.heading")];

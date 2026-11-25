@@ -7,7 +7,7 @@
 //
 #import <UIKit/UIKit.h>
 
-#define XHSNativeVersion @"1.5"
+#define XHSNativeVersion @"1.6"
 
 @class XYTabbarController;
 
@@ -15,6 +15,7 @@
 extern NSString *const kXHSNativeSearchTab;     // 右侧的搜索
 extern NSString *const kXHSNativeMinimize;      // 滚动时收起底栏
 extern NSString *const kXHSNativeHideDiandian;  // 隐藏首页左上角的点点
+extern NSString *const kXHSNativeSearchTopLeft; // 搜索放首页左上角（底栏不再有搜索标签）
 extern NSString *const kXHSNativeGlassNote;
 extern NSString *const kXHSNativeGlassSearch;
 extern NSString *const kXHSNativeGlassComments;
