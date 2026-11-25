@@ -7,15 +7,18 @@
 //
 #import <UIKit/UIKit.h>
 
-#define XHSNativeVersion @"1.7"
+#define XHSNativeVersion @"1.8"
 
 @class XYTabbarController;
 
 // 开关，默认都是开的
 extern NSString *const kXHSNativeSearchTab;     // 右侧的搜索
+extern NSString *const kXHSNativeSwapPublish;   // 交换搜索与发布：发布去底栏右侧，搜索回到首页顶栏，默认关
+extern NSString *const kXHSNativeDoubleTapZoom; // 双击笔记图片放大，不点赞，默认关
 extern NSString *const kXHSNativeMinimize;      // 滚动时收起底栏
-extern NSString *const kXHSNativeHideDiandian;  // 隐藏首页左上角的点点
-extern NSString *const kXHSNativeSearchTopLeft; // 搜索放首页左上角（底栏不再有搜索标签）
+extern NSString *const kXHSNativeDisableDots;   // 禁用点点 AI，默认关
+extern NSString *const kXHSNativeHideDiandian;  // 隐藏点点：首页左上角入口整个藏掉
+extern NSString *const kXHSNativeSearchTopLeft; // 搜索放首页左上角，底栏不再单开一格
 extern NSString *const kXHSNativeGlassNote;
 extern NSString *const kXHSNativeGlassSearch;
 extern NSString *const kXHSNativeGlassComments;
@@ -47,7 +50,6 @@ extern NSString *const kXHSNativeBarProfile;
 @property (nonatomic, strong) UIViewController *searchPage;      // 搜索标签挂的空页面，它不会真的显示
 @property (nonatomic, assign) BOOL rebuilding;
 @property (nonatomic, assign) BOOL tabsDirty;  // 底栏被盖住时改了设置，等露出来再重排
-@property (nonatomic) BOOL rebuildingTabs;  // 正在重建标签期间，系统恢复选中项不算用户重选，别补发自绘底栏点击
 
 #pragma mark - 持久设置（NSUserDefaults）
 
@@ -55,12 +57,19 @@ extern NSString *const kXHSNativeBarProfile;
 @property (class, nonatomic, readonly) NSArray<NSString *> *allTabs;
 
 - (BOOL)boolForKey:(NSString *)key;
+- (BOOL)isDotsDisabled;
+- (BOOL)isPublishSwapped;
+- (BOOL)isDoubleTapZoomEnabled;
 - (void)setBool:(BOOL)value forKey:(NSString *)key;
 
 - (NSArray<NSString *> *)tabOrder;
 - (void)setTabOrder:(NSArray<NSString *> *)order;
 - (BOOL)isTabHidden:(NSString *)name;
 - (void)setTab:(NSString *)name hidden:(BOOL)hidden;
+
+// 首页顶栏的频道，按小红书的 childVCPageName：0 关注 1 发现 2 同城
+- (BOOL)isChannelHidden:(NSUInteger)page;
+- (void)setChannel:(NSUInteger)page hidden:(BOOL)hidden;
 
 // 0 是纯玻璃，100 不透
 - (CGFloat)fillForBar:(NSString *)bar;

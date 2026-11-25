@@ -8,7 +8,10 @@
 #import "XHSNativeConfig.h"
 
 NSString *const kXHSNativeSearchTab = @"XHSNative.searchTab";
+NSString *const kXHSNativeSwapPublish = @"XHSNative.swapPublish";
+NSString *const kXHSNativeDoubleTapZoom = @"XHSNative.doubleTapZoom";
 NSString *const kXHSNativeMinimize = @"XHSNative.minimize";
+NSString *const kXHSNativeDisableDots = @"XHSNative.disableDots";
 NSString *const kXHSNativeHideDiandian = @"XHSNative.hideDiandian";
 NSString *const kXHSNativeSearchTopLeft = @"XHSNative.searchTopLeft";
 NSString *const kXHSNativeGlassNote = @"XHSNative.glass.note";
@@ -29,6 +32,7 @@ NSString *const kXHSNativeBarProfile = @"profile";
 
 static NSString *const kTabOrder = @"XHSNative.tabOrder";
 static NSString *const kTabHidden = @"XHSNative.tabHidden";
+static NSString *const kChannelHidden = @"XHSNative.channelHidden";
 static NSString *const kFillPrefix = @"XHSNative.fill.";
 
 @implementation XHSNativeConfig
@@ -47,6 +51,18 @@ static NSString *const kFillPrefix = @"XHSNative.fill.";
 - (BOOL)boolForKey:(NSString *)key {
     id value = [NSUserDefaults.standardUserDefaults objectForKey:key];
     return value ? [value boolValue] : YES;
+}
+
+- (BOOL)isDotsDisabled {
+    return [NSUserDefaults.standardUserDefaults boolForKey:kXHSNativeDisableDots];
+}
+
+- (BOOL)isPublishSwapped {
+    return [NSUserDefaults.standardUserDefaults boolForKey:kXHSNativeSwapPublish];
+}
+
+- (BOOL)isDoubleTapZoomEnabled {
+    return [NSUserDefaults.standardUserDefaults boolForKey:kXHSNativeDoubleTapZoom];
 }
 
 - (void)setBool:(BOOL)value forKey:(NSString *)key {
@@ -78,6 +94,18 @@ static NSString *const kFillPrefix = @"XHSNative.fill.";
     [names removeObject:name];
     if (hidden) [names addObject:name];
     [defaults setObject:names forKey:kTabHidden];
+}
+
+- (BOOL)isChannelHidden:(NSUInteger)page {
+    return [[NSUserDefaults.standardUserDefaults arrayForKey:kChannelHidden] containsObject:@(page)];
+}
+
+- (void)setChannel:(NSUInteger)page hidden:(BOOL)hidden {
+    NSUserDefaults *defaults = NSUserDefaults.standardUserDefaults;
+    NSMutableArray<NSNumber *> *pages = [([defaults arrayForKey:kChannelHidden] ?: @[]) mutableCopy];
+    [pages removeObject:@(page)];
+    if (hidden) [pages addObject:@(page)];
+    [defaults setObject:pages forKey:kChannelHidden];
 }
 
 - (CGFloat)fillForBar:(NSString *)bar {

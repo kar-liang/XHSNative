@@ -48,6 +48,126 @@
 
 @end
 
+#pragma mark - 图文笔记页
+
+// 系统的 soft 边缘只画在滚动视图自己的范围里，笔记列表从顶栏下沿才开始，画不到顶栏下面。
+// 在顶栏的位置放一个空的滚动视图替它画：列表停在顶上时，它的内容在栏的下方，系统不显示边缘；
+// 列表一往下滑，就把它的内容挪到栏下面，系统显示边缘
+@interface XHSNativeSoftEdge : UIScrollView
+- (void)follow:(UIScrollView *)list;
+@end
+
+@implementation XHSNativeSoftEdge
+
+- (void)follow:(UIScrollView *)list {
+    BOOL scrolled = list.contentOffset.y > 0.5 - list.adjustedContentInset.top;
+    CGFloat offset = scrolled ? 0 : -self.contentInset.top;
+    if (self.contentOffset.y != offset) self.contentOffset = CGPointMake(0, offset);
+}
+
+- (void)observeValueForKeyPath:(NSString *)keyPath ofObject:(UIScrollView *)list change:(NSDictionary *)change context:(void *)context {
+    [self follow:list];
+}
+
+@end
+
+#pragma mark - 双击放大
+
+// 笔记页图片的双指放大由 PinchController 处理：开始时把图片截下来放到全屏的遮罩上，
+// 跟着手指缩放和移动，松手弹回。双击时喂给它一个假的双指手势，效果和双指放大一样；
+// 放大后盖一层透明的视图接手势：单指拖动、双指继续缩放，点一下松开，用它自己的弹回动画收起
+
+@interface XHSNativeFakePinch : UIPinchGestureRecognizer
+@property (nonatomic) UIGestureRecognizerState fakeState;
+@property (nonatomic) CGFloat fakeScale;
+@property (nonatomic) CGPoint fakePoint;  // 窗口坐标
+@property (nonatomic, weak) UIView *hostView;
+@end
+
+@implementation XHSNativeFakePinch
+
+- (UIGestureRecognizerState)state {
+    return self.fakeState;
+}
+
+- (CGFloat)scale {
+    return self.fakeScale;
+}
+
+- (NSUInteger)numberOfTouches {
+    return 2;
+}
+
+- (UIView *)view {
+    return self.hostView;
+}
+
+- (CGPoint)locationInView:(UIView *)view {
+    return view ? [view convertPoint:self.fakePoint fromView:nil] : self.fakePoint;
+}
+
+@end
+
+@interface XHSNativePinchHold : NSObject
+@property (nonatomic, strong) id controller;
+@property (nonatomic, strong) XHSNativeFakePinch *pinch;
+@property (nonatomic, strong) UIView *catcher;
+@property (nonatomic) CGPoint start;
+@property (nonatomic) CGFloat baseScale;
+@property (nonatomic, strong) CADisplayLink *link;
+@property (nonatomic) CFTimeInterval beginTime;
+@end
+
+static XHSNativePinchHold *gPinchHold;
+static const CGFloat kZoomScale = 2.5;
+
+@implementation XHSNativePinchHold
+
+- (void)send:(UIGestureRecognizerState)state {
+    self.pinch.fakeState = state;
+    [self.controller didReceivePinchWithRecognizer:self.pinch];
+}
+
+- (CGFloat)clampScale:(CGFloat)scale {
+    CGFloat limit = [self.controller maxScale] > 1 ? [self.controller maxScale] : kZoomScale;
+    return MAX(1, MIN(limit, scale));
+}
+
+// 从 1 倍放大到 2.5 倍，和手指张开一样逐帧喂
+- (void)grow:(CADisplayLink *)link {
+    if (!self.beginTime) self.beginTime = link.timestamp;
+    CGFloat progress = MIN(1, (link.timestamp - self.beginTime) / 0.25);
+    CGFloat eased = 1 - pow(1 - progress, 3);
+    self.pinch.fakeScale = [self clampScale:1 + (kZoomScale - 1) * eased];
+    [self send:UIGestureRecognizerStateChanged];
+    if (progress < 1) return;
+    [link invalidate];
+    self.link = nil;
+}
+
+- (void)pan:(UIPanGestureRecognizer *)pan {
+    if (pan.state == UIGestureRecognizerStateBegan) self.start = self.pinch.fakePoint;
+    CGPoint move = [pan translationInView:nil];
+    self.pinch.fakePoint = CGPointMake(self.start.x + move.x, self.start.y + move.y);
+    [self send:UIGestureRecognizerStateChanged];
+}
+
+- (void)zoom:(UIPinchGestureRecognizer *)zoom {
+    if (zoom.state == UIGestureRecognizerStateBegan) self.baseScale = self.pinch.fakeScale;
+    self.pinch.fakeScale = [self clampScale:self.baseScale * zoom.scale];
+    [self send:UIGestureRecognizerStateChanged];
+}
+
+- (void)finish {
+    [self.link invalidate];
+    self.link = nil;
+    [self.catcher removeFromSuperview];
+    [self send:UIGestureRecognizerStateEnded];
+    gPinchHold = nil;
+}
+
+@end
+
 #pragma mark - iOS 27.1 以下
 
 // 首页的下沉布局是按 iOS 27.1 写的，用到三个更早的系统上没有的东西：
@@ -233,15 +353,25 @@ static NSArray<NSArray *> *glassBars(void) {
 
 #pragma mark - 小红书
 
+// 这几个方法调用得很频繁，不用 dladdr，先算好主程序代码段的地址范围直接比
 + (BOOL)isAppAddress:(void *)address {
-    static const void *app;
+    static uintptr_t start, end;
     static dispatch_once_t once;
     dispatch_once(&once, ^{
-        for (uint32_t i = 0; i < _dyld_image_count() && !app; i++)
-            if (((const struct mach_header_64 *)_dyld_get_image_header(i))->filetype == MH_EXECUTE) app = _dyld_get_image_header(i);
+        for (uint32_t i = 0; i < _dyld_image_count() && !start; i++) {
+            const struct mach_header_64 *header = (const struct mach_header_64 *)_dyld_get_image_header(i);
+            if (header->filetype != MH_EXECUTE) continue;
+            const struct load_command *command = (const struct load_command *)(header + 1);
+            for (uint32_t j = 0; j < header->ncmds; j++, command = (const struct load_command *)((const char *)command + command->cmdsize)) {
+                const struct segment_command_64 *segment = (const struct segment_command_64 *)command;
+                if (command->cmd != LC_SEGMENT_64 || strcmp(segment->segname, SEG_TEXT)) continue;
+                start = (uintptr_t)header;
+                end = start + segment->vmsize;
+                break;
+            }
+        }
     });
-    Dl_info info;
-    return dladdr(address, &info) && info.dli_fbase == app;
+    return (uintptr_t)address >= start && (uintptr_t)address < end;
 }
 
 + (id)themeGlyph:(NSString *)name {
@@ -324,17 +454,23 @@ static NSArray<NSArray *> *glassBars(void) {
         tab.badgeValue = (legacyNames && badgeIndex != NSNotFound) ? controller.badgeValueDict[@(badgeIndex)] : [self tabNamed:name].badgeValue;
         [tabs addObject:tab];
     }
-    // 「搜索放左上角」开着时底栏不要搜索标签，底栏就是一个居中胶囊；关着才按原来的「搜索」开关来
-    if (![config boolForKey:kXHSNativeSearchTopLeft] && [config boolForKey:kXHSNativeSearchTab]) {
-        // 系统的搜索标签会自己单独排在右边。它不切页面，点了直接开小红书的搜索，见 shouldSelectTab
+    // 搜索放左上角时底栏不再单开一格：搜索标签不加；交换时发布本应去的那一格也没了，交换一并失效
+    BOOL searchTopLeft = [config boolForKey:kXHSNativeSearchTopLeft];
+    BOOL swapped = config.isPublishSwapped && !searchTopLeft;
+    if (!searchTopLeft && ([config boolForKey:kXHSNativeSearchTab] || swapped)) {
+        // 系统的搜索标签会自己单独排在右边。它不切页面，点了直接开小红书的搜索，见 shouldSelectTab。
+        // 交换搜索与发布时，这一格换成发布
         if (!config.searchPage) config.searchPage = [UIViewController new];
         UIViewController *page = config.searchPage;
         UISearchTab *search = [[UISearchTab alloc] initWithViewControllerProvider:^UIViewController *(UITab *t) { return page; }];
         search.automaticallyActivatesSearch = YES;
+        if (swapped) {
+            search.title = @"发布";
+            search.image = [UIImage systemImageNamed:@"plus"];
+        }
         [tabs addObject:search];
     }
     config.rebuilding = YES;
-    config.rebuildingTabs = YES;
     [controller setTabs:tabs animated:NO];
     for (UITabBarItem *item in controller.tabBar.items) {
         if (!item.enabled && [self isItemEnabled:item]) item.enabled = YES;
@@ -346,7 +482,6 @@ static NSArray<NSArray *> *glassBars(void) {
     if (restored) controller.selectedTab = restored;
     controller.tabBarMinimizeBehavior = [config boolForKey:kXHSNativeMinimize] ? UITabBarMinimizeBehaviorOnScrollDown : UITabBarMinimizeBehaviorNever;
     config.rebuilding = NO;
-    config.rebuildingTabs = NO;
 }
 
 // 等同于点原来的加号
@@ -366,67 +501,13 @@ static NSArray<NSArray *> *glassBars(void) {
     });
 }
 
-// 等同于再点一次自绘底栏对应按钮。小红书把重选标签的处理（如首页刷新）写在那条栏自己的点击里，
-// 系统底栏重选时走的是选中回调、不经过它，所以在这里把这一下补回去
-+ (void)tapLegacyTabNamed:(NSString *)name {
-    if ([XHSNativeConfig shared].rebuildingTabs) return;
-    XYTabbarController *controller = XHSNativeConfig.shared.tabBarController;
-    UIView *bar = controller ? [controller customtabBar] : nil;
-    if (!bar || !name.length) return;
-
-    UIControl *control = nil;
-    // 先按自绘底栏自己的标签数据找：tabs 里 itemName 对得上的那个对象
-    id tabsValue = nil;
-    @try { tabsValue = [bar valueForKey:@"tabs"]; } @catch (NSException *exception) { tabsValue = nil; }
-    NSArray *tabs = [tabsValue isKindOfClass:NSArray.class] ? tabsValue : nil;
-    for (id target in tabs) {
-        NSString *itemName = nil;
-        @try { itemName = [target valueForKey:@"itemName"]; } @catch (NSException *exception) { itemName = nil; }
-        if (![itemName isEqualToString:name]) continue;
-        if ([target isKindOfClass:UIControl.class]) control = (UIControl *)target;
-        else if ([target isKindOfClass:UIView.class]) control = [self firstControlIn:(UIView *)target];
-        if (control) break;
-    }
-
-    // 找不到就退一步：自绘底栏上的按钮从左到右和标签顺序一致，按下标取
-    if (!control) {
-        NSArray<NSString *> *names = [self legacyTabNames:controller];
-        NSUInteger index = names ? [names indexOfObject:name] : NSNotFound;
-        if (index != NSNotFound) {
-            NSMutableArray<UIControl *> *controls = [NSMutableArray array];
-            [self collectControlsIn:bar into:controls];
-            UIControl *center = [controller respondsToSelector:@selector(centerButton)] ? [controller centerButton] : nil;
-            NSMutableArray<UIControl *> *candidates = [NSMutableArray array];
-            for (UIControl *candidate in controls) {
-                if (candidate == center) continue;
-                if (CGRectGetWidth(candidate.bounds) <= 0 || CGRectGetHeight(candidate.bounds) <= 0) continue;
-                [candidates addObject:candidate];
-            }
-            [candidates sortUsingComparator:^NSComparisonResult(UIControl *a, UIControl *b) {
-                CGFloat ax = CGRectGetMinX([a convertRect:a.bounds toView:nil]);
-                CGFloat bx = CGRectGetMinX([b convertRect:b.bounds toView:nil]);
-                return ax < bx ? NSOrderedAscending : (ax > bx ? NSOrderedDescending : NSOrderedSame);
-            }];
-            if (index < candidates.count) control = candidates[index];
-        }
-    }
-
-    if (control) [control sendActionsForControlEvents:UIControlEventTouchUpInside];
-}
-
-// 深度优先找第一个 UIControl，view 本身是也算
-+ (UIControl *)firstControlIn:(UIView *)view {
-    if ([view isKindOfClass:UIControl.class]) return (UIControl *)view;
-    for (UIView *subview in view.subviews) {
-        UIControl *control = [self firstControlIn:subview];
-        if (control) return control;
-    }
-    return nil;
-}
-
-+ (void)collectControlsIn:(UIView *)view into:(NSMutableArray<UIControl *> *)out {
-    if ([view isKindOfClass:UIControl.class]) [out addObject:(UIControl *)view];
-    for (UIView *subview in view.subviews) [self collectControlsIn:subview into:out];
+// 重复点当前标签。小红书的每个标签页都实现了 XYTabbarClicked（首页是回到顶部并刷新），
+// 原来由它的自绘底栏调用，换成系统底栏后要自己转过去
++ (void)reselectTab:(UITab *)tab {
+    UINavigationController *navigation = (UINavigationController *)tab.viewController;
+    UIViewController *page = [navigation isKindOfClass:UINavigationController.class] ? navigation.viewControllers.firstObject : navigation;
+    SEL clicked = NSSelectorFromString(@"XYTabbarClicked");
+    if ([page respondsToSelector:clicked]) ((void (*)(id, SEL))objc_msgSend)(page, clicked);
 }
 
 #pragma mark - 首页顶栏
@@ -527,61 +608,69 @@ static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey, kTopSearch
         else if ([name isEqualToString:@"XYSegmentControl"]) segment = view;
         else if (view != publish && view != topSearch && [view isKindOfClass:UIButton.class] && (!search || CGRectGetMinX(view.frame) > CGRectGetMinX(search.frame))) search = view;
     }
-    // 左上角的 XYMenuButton 是「点点」入口，这个位置两种用法，二选一，只在这里决定它的显隐：
-    // 「搜索放左上角」开着时，这个位置放一个玻璃搜索按钮，点点连同背后那块玻璃一起藏起来；
-    // 关着时没有搜索按钮，点点的显隐回到「隐藏点点」开关。
-    // （玻璃是和按钮同一位置的另一个视图，按 frame 相等认，不会误伤中间分段控件的玻璃板。）
-    // 开关切换后 applySettings 会触发重新布局，所以显隐立即生效。
-    if (menu) {
-        BOOL searchTopLeft = [XHSNativeConfig.shared boolForKey:kXHSNativeSearchTopLeft];
-        BOOL hideMenu = searchTopLeft || [XHSNativeConfig.shared boolForKey:kXHSNativeHideDiandian];
-        menu.hidden = hideMenu;
-        for (UIView *view in bar.subviews)
-            if ([view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, menu.frame)) view.hidden = hideMenu;
-        if (searchTopLeft) {
-            if (!topSearch) {
-                UIButtonConfiguration *config = [UIButtonConfiguration glassButtonConfiguration];
-                config.image = [UIImage systemImageNamed:@"magnifyingglass"];
-                config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
-                config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-                config.baseForegroundColor = UIColor.labelColor;
-                topSearch = [UIButton buttonWithConfiguration:config primaryAction:[UIAction actionWithHandler:^(UIAction *action) { [XHSNativeHelper openSearch]; }]];
-                topSearch.accessibilityLabel = @"搜索";
-                objc_setAssociatedObject(bar, &kTopSearchKey, topSearch, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
-            }
-            if (topSearch.superview != bar) [bar addSubview:topSearch];
-            if (!CGRectEqualToRect(topSearch.frame, menu.frame)) topSearch.frame = menu.frame;
-            topSearch.hidden = NO;
-        } else if (topSearch) {
-            topSearch.hidden = YES;
-        }
-    } else if (topSearch) {
-        topSearch.hidden = YES;
-    }
     if (!menu || !search) return;
     XHSNativeConfig.shared.searchButton = (UIControl *)search;
 
-    if (!publish) {
-        UIButtonConfiguration *config = [UIButtonConfiguration glassButtonConfiguration];
-        config.image = [UIImage systemImageNamed:@"plus"];
-        config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
-        config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
-        config.baseForegroundColor = UIColor.labelColor;
-        publish = [UIButton buttonWithConfiguration:config primaryAction:[UIAction actionWithHandler:^(UIAction *action) { [XHSNativeHelper openPublish]; }]];
-        publish.accessibilityLabel = @"发布";
-        objc_setAssociatedObject(bar, &kPublishKey, publish, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+    BOOL searchTopLeft = [XHSNativeConfig.shared boolForKey:kXHSNativeSearchTopLeft];
+    // 搜索放左上角时顶栏按未交换走：发布要去的底栏右侧格已被取消，交换无处落点
+    BOOL swapped = XHSNativeConfig.shared.isPublishSwapped && !searchTopLeft;
+
+    // 左上角入口只有一个位置：搜索放左上角时被搜索按钮占住；否则听「隐藏点点」。入口和它背后那块玻璃一起藏
+    BOOL hideMenu = searchTopLeft || [XHSNativeConfig.shared boolForKey:kXHSNativeHideDiandian];
+    menu.hidden = hideMenu;
+    for (UIView *view in bar.subviews)
+        if ([view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, menu.frame)) view.hidden = hideMenu;
+    if (searchTopLeft) {
+        if (!topSearch) {
+            UIButtonConfiguration *buttonConfig = [UIButtonConfiguration glassButtonConfiguration];
+            buttonConfig.image = [UIImage systemImageNamed:@"magnifyingglass"];
+            buttonConfig.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
+            buttonConfig.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+            buttonConfig.baseForegroundColor = UIColor.labelColor;
+            topSearch = [UIButton buttonWithConfiguration:buttonConfig primaryAction:[UIAction actionWithHandler:^(UIAction *action) { [XHSNativeHelper openSearch]; }]];
+            topSearch.accessibilityLabel = @"搜索";
+            objc_setAssociatedObject(bar, &kTopSearchKey, topSearch, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (topSearch.superview != bar) [bar addSubview:topSearch];
+        if (!CGRectEqualToRect(topSearch.frame, menu.frame)) topSearch.frame = menu.frame;
+        topSearch.hidden = NO;
+    } else if (topSearch) {
+        topSearch.hidden = YES;
     }
-    if (publish.superview != bar) [bar addSubview:publish];
-    if (!CGRectEqualToRect(publish.frame, search.frame)) publish.frame = search.frame;
-    // 原搜索按钮和它背后那块玻璃都收起来（玻璃是和按钮同一位置的另一个视图）
-    for (UIView *view in bar.subviews) {
-        BOOL backing = [view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, search.frame);
-        if ((view == search || backing) && !view.hidden) view.hidden = YES;
+
+    if (swapped) {
+        // 发布去了底栏，原来的搜索留在顶栏。之前收起过的话放出来
+        if (publish) {
+            [publish removeFromSuperview];
+            objc_setAssociatedObject(bar, &kPublishKey, nil, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+            for (UIView *view in bar.subviews) {
+                BOOL backing = [view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, search.frame);
+                if (view == search || backing) view.hidden = NO;
+            }
+        }
+    } else {
+        if (!publish) {
+            UIButtonConfiguration *config = [UIButtonConfiguration glassButtonConfiguration];
+            config.image = [UIImage systemImageNamed:@"plus"];
+            config.preferredSymbolConfigurationForImage = [UIImageSymbolConfiguration configurationWithPointSize:18 weight:UIImageSymbolWeightMedium];
+            config.cornerStyle = UIButtonConfigurationCornerStyleCapsule;
+            config.baseForegroundColor = UIColor.labelColor;
+            publish = [UIButton buttonWithConfiguration:config primaryAction:[UIAction actionWithHandler:^(UIAction *action) { [XHSNativeHelper openPublish]; }]];
+            publish.accessibilityLabel = @"发布";
+            objc_setAssociatedObject(bar, &kPublishKey, publish, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        }
+        if (publish.superview != bar) [bar addSubview:publish];
+        if (!CGRectEqualToRect(publish.frame, search.frame)) publish.frame = search.frame;
+        // 原搜索按钮和它背后那块玻璃都收起来（玻璃是和按钮同一位置的另一个视图）
+        for (UIView *view in bar.subviews) {
+            BOOL backing = [view isKindOfClass:UIVisualEffectView.class] && CGRectEqualToRect(view.frame, search.frame);
+            if ((view == search || backing) && !view.hidden) view.hidden = YES;
+        }
     }
 
     if (!segment) return;
     // 「关注 发现 同城」垫一块玻璃，文字压在图片上才看得清；高度和两侧按钮对齐，在两个按钮之间居中
-    CGFloat left = CGRectGetMaxX(menu.frame) + 8, right = CGRectGetMinX(publish.frame) - 8;
+    CGFloat left = CGRectGetMaxX(menu.frame) + 8, right = CGRectGetMinX(search.frame) - 8;
     CGFloat width = MIN(right - left, CGRectGetWidth(segment.frame) + 16);
     CGFloat x = left + (right - left - width) / 2;
     CGRect frame = segment.frame;
@@ -589,6 +678,30 @@ static char kBarEdgeKey, kSoftEdgeKey, kPublishKey, kSegmentGlassKey, kTopSearch
     if (!CGRectEqualToRect(segment.frame, frame)) segment.frame = frame;
     CGRect plate = segment.hidden ? CGRectZero : CGRectMake(x, CGRectGetMinY(menu.frame), width, CGRectGetHeight(menu.frame));
     [self plateOn:bar key:&kSegmentGlassKey below:segment frame:plate bar:kXHSNativeBarHome];
+}
+
+// 首页的频道页（关注 发现 同城）都由 childViewModels 提供，标题、分页、按频道找下标都从这里取，
+// 在这一处过滤就能整个藏掉。全藏了就不过滤
++ (NSArray *)visibleChannels:(NSArray *)children {
+    XHSNativeConfig *config = XHSNativeConfig.shared;
+    NSMutableArray *visible = [NSMutableArray array];
+    for (id child in children)
+        if (![child respondsToSelector:@selector(childVCPageName)] || ![config isChannelHidden:[child childVCPageName]]) [visible addObject:child];
+    return visible.count ? visible : children;
+}
+
+// 默认打开的频道被藏了，就打开剩下的第一个
++ (NSUInteger)landingChannel:(NSUInteger)page ofHome:(XYMHomeViewController *)home {
+    if (![XHSNativeConfig.shared isChannelHidden:page]) return page;
+    id first = [[home dataSource] childViewModels].firstObject;
+    return [first respondsToSelector:@selector(childVCPageName)] ? [first childVCPageName] : page;
+}
+
+// 首页左上角的入口由服务器按账号下发：SETTING 侧边栏菜单，DOT 点点，RED_BOX 红包。
+// 禁用点点时把 DOT 当成 SETTING，图标和点击都回到侧边栏菜单
++ (NSString *)leftEntranceType:(NSString *)type {
+    if (!XHSNativeConfig.shared.isDotsDisabled || ![type isEqualToString:@"DOT"]) return type;
+    return @"SETTING";
 }
 
 #pragma mark - 滚动联动
@@ -680,7 +793,18 @@ static void extendDown(UIView *parent, UIView *root, CGFloat gap, int depth) {
 // 正文延伸到上下两条栏的后面，栏的底色去掉，控件悬浮在玻璃胶囊上。
 // 顶栏两块：返回 + 头像 + 昵称 / 关注 + 分享；底栏一块：评论框 + 点赞收藏评论。
 
-static char kNoteLeftKey, kNoteRightKey, kNoteBottomKey, kNoteEdgeKey;
+static char kNoteLeftKey, kNoteRightKey, kNoteBottomKey, kNoteBottomRightKey, kNoteEdgeKey;
+
+// 不算位移的 frame（frame 会把 transform 算进去）
+static CGRect layoutFrame(UIView *view) {
+    CGSize size = view.bounds.size;
+    return CGRectMake(view.center.x - size.width / 2, view.center.y - size.height / 2, size.width, size.height);
+}
+
+static void setOffset(UIView *view, CGFloat x, CGFloat y) {
+    CGAffineTransform transform = (fabs(x) < 0.5 && fabs(y) < 0.5) ? CGAffineTransformIdentity : CGAffineTransformMakeTranslation(x, y);
+    if (view && !CGAffineTransformEqualToTransform(view.transform, transform)) view.transform = transform;
+}
 
 + (void)layoutNoteTop:(UIView *)bar {
     [self clearBackground:bar];
@@ -726,7 +850,7 @@ static char kNoteLeftKey, kNoteRightKey, kNoteBottomKey, kNoteEdgeKey;
 + (void)layoutNoteBottom:(UIView *)bar {
     [self clearBackground:bar];
     XYNoteInteractionView *content = (id)[self subviewOf:bar named:@"XYNoteModule.InteractionView"];
-    if (!content) return;
+    if (!content.window) return;
     [self clearBackground:content];
     UIView *stack = nil;
     for (UIView *view in content.subviews) {
@@ -741,11 +865,47 @@ static char kNoteLeftKey, kNoteRightKey, kNoteBottomKey, kNoteEdgeKey;
     UIView *mask = [like respondsToSelector:@selector(lottieMaskView)] ? like.lottieMaskView : nil;
     if (mask && mask.superview == like.imageView && !mask.subviews.count && mask.alpha != 0) mask.alpha = 0;
     // 评论框自带的灰色药丸底去掉，和旁边的按钮一样直接放在玻璃上
-    for (UIView *group in stack.subviews)
-        for (UIView *field in group.subviews)
-            if ([NSStringFromClass(field.class) hasSuffix:@"Field"]) [self clearBackground:field];
-    CGRect frame = CGRectMake(8, CGRectGetMidY(stack.frame) - 24, CGRectGetWidth(content.bounds) - 16, 48);
-    [self plateOn:bar key:&kNoteBottomKey below:stack frame:frame bar:kXHSNativeBarNoteBottom];
+    UIView *fieldGroup = nil, *buttons = nil;
+    for (UIView *group in stack.subviews) {
+        BOOL hasField = NO;
+        for (UIView *field in group.subviews) {
+            if (![NSStringFromClass(field.class) hasSuffix:@"Field"]) continue;
+            [self clearBackground:field];
+            hasField = YES;
+        }
+        if (hasField) fieldGroup = fieldGroup ?: group;
+        else if ([group isKindOfClass:UIStackView.class]) buttons = group;
+    }
+
+    // 拆成两块：左边评论框，右边点赞、收藏、评论。左右和底下留一样的边距，和屏幕圆角同心；
+    // 没有底部安全区的机型在栏里居中。控件用位移挪进去，不动小红书的约束
+    CGFloat height = 48, gap = 10, padding = 10;
+    CGFloat width = CGRectGetWidth(content.bounds), below = CGRectGetHeight(content.window.bounds) - CGRectGetMaxY([content convertRect:content.bounds toView:nil]);
+    CGFloat margin = content.window.safeAreaInsets.bottom > 0 ? 20 : (CGRectGetHeight(content.bounds) - height) / 2;
+    CGFloat y = CGRectGetHeight(content.bounds) + below - margin - height;
+    CGRect row = layoutFrame(stack);
+    setOffset(stack, 0, y + height / 2 - CGRectGetMidY(row));
+
+    CGRect left = CGRectMake(margin, y, width - margin * 2, height), right = CGRectZero;
+    if (fieldGroup && buttons) {
+        CGRect group = layoutFrame(buttons);
+        right = CGRectMake(width - margin - CGRectGetWidth(group) - padding * 2, y, CGRectGetWidth(group) + padding * 2, height);
+        left.size.width = CGRectGetMinX(right) - gap - margin;
+        if (CGRectGetWidth(left) < 80) {
+            // 数字太长放不下两块，退回一整条
+            left.size.width = width - margin * 2;
+            right = CGRectZero;
+        }
+    }
+    if (CGRectIsEmpty(right)) {
+        setOffset(fieldGroup, 0, 0);
+        setOffset(buttons, 0, 0);
+    } else {
+        setOffset(fieldGroup, margin + 6 - CGRectGetMinX(row) - CGRectGetMinX(layoutFrame(fieldGroup)), 0);
+        setOffset(buttons, CGRectGetMaxX(right) - padding - CGRectGetMinX(row) - CGRectGetMaxX(layoutFrame(buttons)), 0);
+    }
+    [self plateOn:bar key:&kNoteBottomKey below:stack frame:left bar:kXHSNativeBarNoteBottom];
+    [self plateOn:bar key:&kNoteBottomRightKey below:stack frame:right bar:kXHSNativeBarNoteBottom];
 }
 
 + (void)layoutNotePage:(UIViewController *)page {
@@ -757,29 +917,35 @@ static char kNoteLeftKey, kNoteRightKey, kNoteBottomKey, kNoteEdgeKey;
         if ([view isKindOfClass:UICollectionView.class]) list = list ?: (UICollectionView *)view;
     if (!top || !bottom || !list || top.hidden || bottom.hidden) return;
 
-    // 首图沿用导航栏下沿作为起点。滚出列表边界的部分可以透过导航栏看到。
-    CGFloat start = CGRectGetMaxY(top.frame);
-    CGRect viewport = CGRectMake(0, start, CGRectGetWidth(root.bounds), CGRectGetHeight(root.bounds) - start);
-    if (CGRectIsEmpty(viewport)) return;
-    UIEdgeInsets extra = page.additionalSafeAreaInsets;
-    extra.bottom = MAX(0, CGRectGetMaxY(root.bounds) - CGRectGetMinY(bottom.frame) - root.window.safeAreaInsets.bottom);
-    if (!UIEdgeInsetsEqualToEdgeInsets(page.additionalSafeAreaInsets, extra)) page.additionalSafeAreaInsets = extra;
-    if (!CGRectEqualToRect(list.frame, viewport)) list.frame = viewport;
+    // 列表的位置不动，它本来就夹在上下两条栏之间。不裁剪，滚出去的内容就能透过栏看到；
+    // 可见范围往上下扩到屏幕边，栏后面的单元格才不会被回收（否则栏下面会一块块露出底色）
     if (list.clipsToBounds) list.clipsToBounds = NO;
-    if (list.contentInsetAdjustmentBehavior != UIScrollViewContentInsetAdjustmentAlways)
-        list.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentAlways;
+    UIEdgeInsets reach = UIEdgeInsetsMake(-CGRectGetMinY(list.frame), 0, CGRectGetMaxY(list.frame) - CGRectGetMaxY(root.bounds), 0);
+    if ([list respondsToSelector:@selector(_setVisibleRectEdgeInsets:)] && !UIEdgeInsetsEqualToEdgeInsets([list _visibleRectEdgeInsets], reach))
+        [list _setVisibleRectEdgeInsets:reach];
 
-    // 顶部用系统的 soft 边缘；底部不要边缘效果，胶囊直接浮在正文上
-    list.topEdgeEffect.style = UIScrollEdgeEffectStyle.softStyle;
-    if (!list.bottomEdgeEffect.hidden) list.bottomEdgeEffect.hidden = YES;
-    UIScrollEdgeElementContainerInteraction *interaction = objc_getAssociatedObject(top, &kNoteEdgeKey);
-    if (!interaction) {
-        interaction = [UIScrollEdgeElementContainerInteraction new];
+    // 顶栏下面的 soft 边缘，见 XHSNativeSoftEdge；底部不要边缘效果，胶囊直接浮在正文上
+    XHSNativeSoftEdge *edge = objc_getAssociatedObject(list, &kNoteEdgeKey);
+    if (!edge) {
+        edge = [XHSNativeSoftEdge new];
+        edge.userInteractionEnabled = NO;
+        edge.contentInsetAdjustmentBehavior = UIScrollViewContentInsetAdjustmentNever;
+        edge.topEdgeEffect.style = UIScrollEdgeEffectStyle.softStyle;
+        UIScrollEdgeElementContainerInteraction *interaction = [UIScrollEdgeElementContainerInteraction new];
         interaction.edge = UIRectEdgeTop;
+        interaction.scrollView = edge;
         [top addInteraction:interaction];
-        objc_setAssociatedObject(top, &kNoteEdgeKey, interaction, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
+        [list addObserver:edge forKeyPath:@"contentOffset" options:0 context:NULL];
+        objc_setAssociatedObject(list, &kNoteEdgeKey, edge, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
-    if (interaction.scrollView != list) interaction.scrollView = list;
+    if (edge.superview != root) [root insertSubview:edge belowSubview:top];
+    if (!CGRectEqualToRect(edge.frame, top.frame)) {
+        edge.frame = top.frame;
+        edge.contentSize = top.frame.size;
+        edge.contentInset = UIEdgeInsetsMake(CGRectGetHeight(top.frame), 0, 0, 0);
+    }
+    [edge follow:list];
+    if (!list.bottomEdgeEffect.hidden) list.bottomEdgeEffect.hidden = YES;
 
     [self layoutNoteTop:top];
     [self layoutNoteBottom:bottom];
@@ -800,6 +966,46 @@ static char kNoteLeftKey, kNoteRightKey, kNoteBottomKey, kNoteEdgeKey;
         [self layoutNoteTop:view];
         break;
     }
+}
+
+// 双击图片：用小红书自己的双指放大，见 XHSNativePinchHold
++ (void)toggleZoomInBrowser:(UIView *)browser {
+    if (gPinchHold) return [gPinchHold finish];
+    id controller = [browser respondsToSelector:@selector(pinchController)] ? [browser pinchController] : nil;
+    if (![controller respondsToSelector:@selector(didReceivePinchWithRecognizer:)] || ![controller installed] || [controller inTransform]) return;
+    UIWindow *window = browser.window;
+    UIGestureRecognizer *real = [controller recognizer];
+    if (!window || !real.view) return;
+
+    XHSNativePinchHold *hold = [XHSNativePinchHold new];
+    hold.controller = controller;
+    hold.pinch = [[XHSNativeFakePinch alloc] initWithTarget:nil action:nil];
+    hold.pinch.hostView = real.view;
+    hold.pinch.fakeScale = 1;
+    // 以点按的位置为中心放大
+    id tap = [browser respondsToSelector:@selector(multiRegesture)] ? [browser multiRegesture] : nil;
+    hold.pinch.fakePoint = [tap isKindOfClass:UIGestureRecognizer.class] ? [(UIGestureRecognizer *)tap locationInView:nil]
+                                                                        : [browser convertPoint:CGPointMake(CGRectGetMidX(browser.bounds), CGRectGetMidY(browser.bounds)) toView:nil];
+    // 开始时它从自己的 recognizer 取位置和手指数，先换成假的
+    [controller setRecognizer:hold.pinch];
+    [hold send:UIGestureRecognizerStateBegan];
+    [controller setRecognizer:real];
+    if (![controller inTransform]) return;
+
+    UIView *catcher = [[UIView alloc] initWithFrame:window.bounds];
+    catcher.autoresizingMask = UIViewAutoresizingFlexibleWidth | UIViewAutoresizingFlexibleHeight;
+    [catcher addGestureRecognizer:[[UIPanGestureRecognizer alloc] initWithTarget:hold action:@selector(pan:)]];
+    [catcher addGestureRecognizer:[[UIPinchGestureRecognizer alloc] initWithTarget:hold action:@selector(zoom:)]];
+    [catcher addGestureRecognizer:[[UITapGestureRecognizer alloc] initWithTarget:hold action:@selector(finish)]];
+    [window addSubview:catcher];
+    hold.catcher = catcher;
+    hold.link = [CADisplayLink displayLinkWithTarget:hold selector:@selector(grow:)];
+    [hold.link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    gPinchHold = hold;
+}
+
++ (void)resetZoom {
+    [gPinchHold finish];
 }
 
 #pragma mark - 视频页
@@ -867,26 +1073,43 @@ static void darken(UIVisualEffectView *glass) {
     NSMutableArray *rows = [NSMutableArray arrayWithObject:gap(12)];
     [rows addObject:row(@"label", rowTitle(@"底部标签栏"), @"tabs.heading")];
     [rows addObject:gap(8)];
+    // 每组里的行按文字从短到长排
+    for (NSString *name in @[@"me", @"shopping", @"message"])
+        [rows addObject:switchRow(tabTitles()[name], ![config isTabHidden:name], [@"tab." stringByAppendingString:name])];
+    [rows addObject:switchRow(@"搜索", [config boolForKey:kXHSNativeSearchTab], [@"pref." stringByAppendingString:kXHSNativeSearchTab])];
     NSMutableArray<NSString *> *order = [NSMutableArray array];
     for (NSString *name in config.tabOrder) [order addObject:tabTitles()[name]];
     [rows addObject:row(@"arrow", with(rowTitle(@"标签顺序"), @"setTrailing", [order componentsJoinedByString:@" "]), @"order")];
-    for (NSString *name in @[@"shopping", @"message", @"me"])
-        [rows addObject:switchRow(tabTitles()[name], ![config isTabHidden:name], [@"tab." stringByAppendingString:name])];
-    [rows addObject:switchRow(@"搜索", [config boolForKey:kXHSNativeSearchTab], [@"pref." stringByAppendingString:kXHSNativeSearchTab])];
     [rows addObject:switchRow(@"滚动时收起", [config boolForKey:kXHSNativeMinimize], [@"pref." stringByAppendingString:kXHSNativeMinimize])];
+    [rows addObject:switchRow(@"交换搜索与发布", config.isPublishSwapped, [@"pref." stringByAppendingString:kXHSNativeSwapPublish])];
+    [rows addObject:switchRow(@"搜索放左上角", [config boolForKey:kXHSNativeSearchTopLeft], [@"pref." stringByAppendingString:kXHSNativeSearchTopLeft])];
+    [rows addObject:gap(8)];
+    [rows addObject:row(@"label", rowTitle(@"交换后，发布在底栏右侧，搜索回到首页顶栏。"), @"tabs.note")];
     [rows addObject:gap(24)];
 
-    [rows addObject:row(@"label", rowTitle(@"首页"), @"home.heading")];
+    [rows addObject:row(@"label", rowTitle(@"首页频道"), @"channels.heading")];
     [rows addObject:gap(8)];
+    NSArray *channels = @[@"关注", @"发现", @"同城"];
+    for (NSUInteger page = 0; page < channels.count; page++)
+        [rows addObject:switchRow(channels[page], ![config isChannelHidden:page], [NSString stringWithFormat:@"channel.%lu", (unsigned long)page])];
+    [rows addObject:gap(8)];
+    [rows addObject:row(@"label", rowTitle(@"重启小红书后生效。"), @"channels.note")];
+    [rows addObject:gap(24)];
+
+    [rows addObject:row(@"label", rowTitle(@"功能"), @"features.heading")];
+    [rows addObject:gap(8)];
+    [rows addObject:switchRow(@"禁用点点 AI", config.isDotsDisabled, [@"pref." stringByAppendingString:kXHSNativeDisableDots])];
     [rows addObject:switchRow(@"隐藏点点", [config boolForKey:kXHSNativeHideDiandian], [@"pref." stringByAppendingString:kXHSNativeHideDiandian])];
-    [rows addObject:switchRow(@"搜索放左上角", [config boolForKey:kXHSNativeSearchTopLeft], [@"pref." stringByAppendingString:kXHSNativeSearchTopLeft])];
+    [rows addObject:switchRow(@"双击放大图片", config.isDoubleTapZoomEnabled, [@"pref." stringByAppendingString:kXHSNativeDoubleTapZoom])];
+    [rows addObject:gap(8)];
+    [rows addObject:row(@"label", rowTitle(@"禁用点点 AI 后重启小红书生效。\n双击放大的图片，再双击缩回。"), @"features.note")];
     [rows addObject:gap(24)];
 
     [rows addObject:row(@"label", rowTitle(@"液态玻璃"), @"glass.heading")];
     [rows addObject:gap(8)];
-    for (NSArray *option in @[@[@"图文笔记", kXHSNativeGlassNote], @[@"视频", kXHSNativeGlassVideo], @[@"搜索栏", kXHSNativeGlassSearch],
-                              @[@"评论输入栏", kXHSNativeGlassComments], @[@"私聊输入栏", kXHSNativeGlassChat],
-                              @[@"消息顶栏", kXHSNativeGlassMessages], @[@"个人页顶栏", kXHSNativeGlassProfile]])
+    for (NSArray *option in @[@[@"视频", kXHSNativeGlassVideo], @[@"搜索栏", kXHSNativeGlassSearch], @[@"图文笔记", kXHSNativeGlassNote],
+                              @[@"消息顶栏", kXHSNativeGlassMessages], @[@"评论输入栏", kXHSNativeGlassComments],
+                              @[@"私聊输入栏", kXHSNativeGlassChat], @[@"个人页顶栏", kXHSNativeGlassProfile]])
         [rows addObject:switchRow(option[0], [config boolForKey:option[1]], [@"pref." stringByAppendingString:option[1]])];
     [rows addObject:gap(8)];
     [rows addObject:row(@"label", rowTitle(@"下次进入页面时生效。"), @"glass.note")];
@@ -979,6 +1202,7 @@ static void darken(UIVisualEffectView *glass) {
     XHSNativeConfig *config = XHSNativeConfig.shared;
     if ([identity hasPrefix:@"pref."]) [config setBool:on forKey:[identity substringFromIndex:5]];
     else if ([identity hasPrefix:@"tab."]) [config setTab:[identity substringFromIndex:4] hidden:!on];
+    else if ([identity hasPrefix:@"channel."]) [config setChannel:[identity substringFromIndex:8].integerValue hidden:!on];
     [self applySettings];
 }
 

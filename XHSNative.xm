@@ -164,10 +164,11 @@
 %new
 - (BOOL)tabBarController:(UITabBarController *)controller shouldSelectTab:(UITab *)tab {
     if ([tab isKindOfClass:UISearchTab.class]) {
-        [XHSNativeHelper openSearch];
+        if (XHSNativeConfig.shared.isPublishSwapped) [XHSNativeHelper openPublish];
+        else [XHSNativeHelper openSearch];
         return NO;
     }
-    // 已选中还点它要放行，让 didSelect 收到重选；小红书自己的 shouldSelect 可能会把这一下拦掉
+    // 重选要放行，didSelect 才收得到；小红书自己的 shouldSelect 可能会把它拦掉
     if (tab == controller.selectedTab) return YES;
     if (![self respondsToSelector:@selector(tabBarController:shouldSelectViewController:)]) return YES;
     return [self tabBarController:controller shouldSelectViewController:tab.viewController];
@@ -177,9 +178,7 @@
 - (void)tabBarController:(UITabBarController *)controller didSelectTab:(UITab *)tab previousTab:(UITab *)previous {
     if ([self respondsToSelector:@selector(tabBarController:didSelectViewController:)])
         [self tabBarController:controller didSelectViewController:tab.viewController];
-    // 重选同一个标签，把这一下补发给自绘底栏对应按钮，走它原厂逻辑
-    if (previous && [tab.identifier isEqualToString:previous.identifier])
-        [XHSNativeHelper tapLegacyTabNamed:tab.identifier];
+    if (tab == previous) [XHSNativeHelper reselectTab:tab];
 }
 
 %end
@@ -225,6 +224,18 @@
 
 - (BOOL)homeLiquidGlassEnabled {
     return YES;
+}
+
+- (NSUInteger)defaultLandingTabPage {
+    return [XHSNativeHelper landingChannel:%orig ofHome:self];
+}
+
+%end
+
+%hook XYMHomeDataSource
+
+- (NSArray *)childViewModels {
+    return [XHSNativeHelper visibleChannels:%orig];
 }
 
 %end
@@ -286,6 +297,81 @@
     [XHSNativeHelper layoutHomeBar:self];
 }
 
+%end
+
+#pragma mark - 点点
+
+// 点点的入口：首页左上角、首页左滑、笔记里的「问点点」、分享面板。禁用后都按没有点点处理
+
+%hook XYMainFrameEntranceConfig
+- (NSString *)leftSideBarType {
+    return [XHSNativeHelper leftEntranceType:%orig];
+}
+%end
+
+// 上次的入口类型会按账号缓存，启动时先用它
+%hook XYMainFrameLeftCache
+- (NSString *)type {
+    return [XHSNativeHelper leftEntranceType:%orig];
+}
+%end
+
+%hook XYHomeDotsSwipeInstaller
++ (id)installWithHost:(id)host pager:(id)pager finishPagerHandoff:(id)handoff {
+    return XHSNativeConfig.shared.isDotsDisabled ? nil : %orig;
+}
+%end
+
+%hook XYHomeService
+- (BOOL)isDianDianLeftEnable {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+- (BOOL)enableShareToDianDianExp {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+- (BOOL)isDotsEntryEnabledForCategory:(id)category {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+%end
+
+%hook XYPHNoteShareController
+- (BOOL)enableShowDianDian {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+- (BOOL)enableShowDianDianWithScene {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+- (BOOL)enableShareToDianDianApp {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+%end
+
+%hook XYPHWebPageShareController
+- (BOOL)enableShowDianDian {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+- (BOOL)enableShareToDianDianApp {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+%end
+
+%hook XYPHUserShareController
+- (BOOL)enableShowDianDian {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
+- (BOOL)enableShareToDianDianApp {
+    if (XHSNativeConfig.shared.isDotsDisabled) return NO;
+    return %orig;
+}
 %end
 
 #pragma mark - 滚动联动
@@ -428,6 +514,18 @@
 - (void)layoutSubviews {
     %orig;
     [XHSNativeHelper recenterAuthorRow:self];
+}
+%end
+
+// 双击图片：放大，不点赞
+%hook XYNoteImageView
+- (void)browser:(id)browser doubleClickedAt:(NSInteger)index {
+    if (!XHSNativeConfig.shared.isDoubleTapZoomEnabled) return %orig;
+    [XHSNativeHelper toggleZoomInBrowser:browser];
+}
+- (void)browser:(id)browser indexDidChanged:(NSInteger)index {
+    %orig;
+    [XHSNativeHelper resetZoom];
 }
 %end
 
@@ -577,9 +675,15 @@
           XYCommentHalfBar = objc_getClass("_TtCC12XYNoteModule32CommentHalflayerBottomController4View"),
           XYNativeSearchBar = objc_getClass("XYSearchBar.XYSearchBarV2"),
           XYDeviceUtility = objc_getClass("XYUIKit.DeviceUtility"),
+          XYMHomeDataSource = objc_getClass("XYHomeModule.XYMHomeDataSource"),
+          XYMainFrameEntranceConfig = objc_getClass("XYHomeModule.MainFrameEntranceConfigManager"),
+          XYMainFrameLeftCache = objc_getClass("XYModuleInterface.MainFrameLeftCacheModel"),
+          XYHomeDotsSwipeInstaller = objc_getClass("XYHomeModule.HomeDotsSwipeInstaller"),
+          XYHomeService = objc_getClass("XYHomeModule.HomeServiceImp"),
           XYMarketRootInterface = objc_getClass("XYShopping.MarketRootInterface"),
           XYNoteDetailPage = objc_getClass("XYNoteModule.NoteDetailPageInterface"),
           XYNoteDirectionView = objc_getClass("XYNoteModule.NoteDirectionView"),
+          XYNoteImageView = objc_getClass("XYNoteModule.NoteImageView"),
           XYVFHeadView = objc_getClass("XYOldNoteModule.VFHeadView"),
           XYVFBottomEngageView = objc_getClass("XYOldNoteModule.VFBottomEngageView"));
 }

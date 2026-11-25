@@ -36,7 +36,7 @@
 + (void)rebuildTabs;
 + (void)openPublish;
 + (void)openSearch;
-+ (void)tapLegacyTabNamed:(NSString *)name;
++ (void)reselectTab:(UITab *)tab;
 
 #pragma mark - 首页顶栏
 
@@ -47,6 +47,9 @@
 + (void)attachVisibleList;
 + (void)stripBarBackground:(XYMHomeNaviBar *)bar;
 + (void)layoutHomeBar:(XYMHomeNaviBar *)bar;
++ (NSArray *)visibleChannels:(NSArray *)children;
++ (NSUInteger)landingChannel:(NSUInteger)page ofHome:(XYMHomeViewController *)home;
++ (NSString *)leftEntranceType:(NSString *)type;
 
 #pragma mark - 滚动联动
 
@@ -58,6 +61,8 @@
 + (void)layoutNotePage:(UIViewController *)page;
 + (void)layoutNoteTop:(UIView *)bar;
 + (void)recenterAuthorRow:(UIView *)row;
++ (void)toggleZoomInBrowser:(UIView *)browser;
++ (void)resetZoom;
 + (void)layoutVideoHead:(UIView *)head;
 + (void)layoutVideoEngage:(UIView *)bar;
 
