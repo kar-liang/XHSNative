@@ -305,6 +305,8 @@ static NSArray<NSArray *> *glassBars(void) {
 
 #pragma mark - 视图
 
+static char kPlateKeyMarker;
+
 + (UIVisualEffectView *)plateOn:(UIView *)owner key:(const void *)key below:(UIView *)below frame:(CGRect)frame bar:(NSString *)bar {
     UIVisualEffectView *glass = objc_getAssociatedObject(owner, key);
     if (!glass) {
@@ -312,11 +314,20 @@ static NSArray<NSArray *> *glassBars(void) {
         glass.cornerConfiguration = [UICornerConfiguration capsuleConfiguration];
         glass.userInteractionEnabled = NO;
         glass.contentView.layer.masksToBounds = YES;
+        objc_setAssociatedObject(glass, &kPlateKeyMarker, [NSValue valueWithPointer:key], OBJC_ASSOCIATION_RETAIN_NONATOMIC);
         objc_setAssociatedObject(owner, key, glass, OBJC_ASSOCIATION_RETAIN_NONATOMIC);
     }
     BOOL empty = CGRectIsEmpty(frame) || !below.superview;
     if (glass.hidden != empty) glass.hidden = empty;
     if (empty) return glass;
+
+    // 容器被复用、owner 却换了新实例时，旧 owner 的玻璃还留在容器里（关联对象随旧 owner 释放，
+    // 新 owner 查不到它），每进一次页面叠一层。同 key 的旧玻璃在插入前清掉，保证一处只有一块。
+    for (UIView *sibling in [below.superview.subviews copy]) {
+        if (sibling == glass) continue;
+        NSValue *marker = objc_getAssociatedObject(sibling, &kPlateKeyMarker);
+        if (marker && marker.pointerValue == key) [sibling removeFromSuperview];
+    }
 
     NSArray<UIView *> *siblings = below.superview.subviews;
     NSUInteger index = [siblings indexOfObjectIdenticalTo:below];
