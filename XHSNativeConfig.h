@@ -7,7 +7,7 @@
 //
 #import <UIKit/UIKit.h>
 
-#define XHSNativeVersion @"1.6"
+#define XHSNativeVersion @"1.7"
 
 @class XYTabbarController;
 
@@ -47,6 +47,7 @@ extern NSString *const kXHSNativeBarProfile;
 @property (nonatomic, strong) UIViewController *searchPage;      // 搜索标签挂的空页面，它不会真的显示
 @property (nonatomic, assign) BOOL rebuilding;
 @property (nonatomic, assign) BOOL tabsDirty;  // 底栏被盖住时改了设置，等露出来再重排
+@property (nonatomic) BOOL rebuildingTabs;  // 正在重建标签期间，系统恢复选中项不算用户重选，别补发自绘底栏点击
 
 #pragma mark - 持久设置（NSUserDefaults）
 

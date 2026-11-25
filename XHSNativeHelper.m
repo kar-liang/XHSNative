@@ -334,6 +334,7 @@ static NSArray<NSArray *> *glassBars(void) {
         [tabs addObject:search];
     }
     config.rebuilding = YES;
+    config.rebuildingTabs = YES;
     [controller setTabs:tabs animated:NO];
     for (UITabBarItem *item in controller.tabBar.items) {
         if (!item.enabled && [self isItemEnabled:item]) item.enabled = YES;
@@ -345,6 +346,7 @@ static NSArray<NSArray *> *glassBars(void) {
     if (restored) controller.selectedTab = restored;
     controller.tabBarMinimizeBehavior = [config boolForKey:kXHSNativeMinimize] ? UITabBarMinimizeBehaviorOnScrollDown : UITabBarMinimizeBehaviorNever;
     config.rebuilding = NO;
+    config.rebuildingTabs = NO;
 }
 
 // 等同于点原来的加号
@@ -367,6 +369,7 @@ static NSArray<NSArray *> *glassBars(void) {
 // 等同于再点一次自绘底栏对应按钮。小红书把重选标签的处理（如首页刷新）写在那条栏自己的点击里，
 // 系统底栏重选时走的是选中回调、不经过它，所以在这里把这一下补回去
 + (void)tapLegacyTabNamed:(NSString *)name {
+    if ([XHSNativeConfig shared].rebuildingTabs) return;
     XYTabbarController *controller = XHSNativeConfig.shared.tabBarController;
     UIView *bar = controller ? [controller customtabBar] : nil;
     if (!bar || !name.length) return;
